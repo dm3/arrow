@@ -160,8 +160,17 @@ impl SerializedFileWriter {
         mut row_group_writer: Box<RowGroupWriter>,
     ) -> Result<()> {
         let row_group_metadata = row_group_writer.close()?;
-        self.row_groups.push(row_group_metadata);
-        Ok(())
+        // metadata num_rows is an i64 but can't be negative as produced by the
+        // RowGroupWriter.close()
+        let num_rows = row_group_metadata.num_rows() as u64;
+        let (total_num_rows, overflow) = self.total_num_rows.overflowing_add(num_rows);
+        if overflow {
+            Err(general_err!("Total num rows overflowed"))
+        } else {
+            self.total_num_rows = total_num_rows;
+            self.row_groups.push(row_group_metadata);
+            Ok(())
+        }
     }
 
     /// Assembles and writes metadata at the end of the file.
@@ -942,6 +951,8 @@ mod tests {
         file_writer.close().unwrap();
 
         let reader = SerializedFileReader::new(file).unwrap();
+        let expected_num_rows: usize = data.iter().map(|v| v.len()).sum();
+        assert_eq!(reader.metadata().file_metadata().num_rows(), expected_num_rows as i64);
         assert_eq!(reader.num_row_groups(), data.len());
         for i in 0..reader.num_row_groups() {
             let row_group_reader = reader.get_row_group(i).unwrap();
